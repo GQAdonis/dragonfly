@@ -24,24 +24,32 @@
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
+#include "util/cloud/gcp/gcs_file.h"
 #include "util/fibers/fiber_file.h"
 
 namespace dfly {
 namespace detail {
 
 using namespace util;
+using namespace std;
 
-std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_view path) {
-  std::string_view clean = absl::StripPrefix(path, kS3Prefix);
-
-  size_t pos = clean.find('/');
-  if (pos == std::string_view::npos) {
-    return std::make_pair(std::string(clean), "");
+pair<string, string> GetBucketPath(string_view path) {
+  string_view clean = path;
+  if (absl::StartsWith(clean, kS3Prefix)) {
+    clean = absl::StripPrefix(clean, kS3Prefix);
+  } else {
+    clean = absl::StripPrefix(clean, kGCSPrefix);
   }
 
-  std::string bucket_name{clean.substr(0, pos)};
-  std::string obj_path{clean.substr(pos + 1)};
-  return std::make_pair(std::move(bucket_name), std::move(obj_path));
+  size_t pos = clean.find('/');
+  if (pos == string_view::npos) {
+    return make_pair(string(clean), "");
+  }
+
+  string bucket_name{clean.substr(0, pos)};
+  string obj_path{clean.substr(pos + 1)};
+
+  return make_pair(std::move(bucket_name), std::move(obj_path));
 }
 
 #ifdef __linux__
@@ -175,6 +183,47 @@ io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPath
   }
 
   return paths;
+}
+
+GcsSnapshotStorage::~GcsSnapshotStorage() {
+}
+
+error_code GcsSnapshotStorage::Init(unsigned connect_ms) {
+  fb2::ProactorBase* proactor = fb2::ProactorBase::me();
+  error_code ec = creds_provider_.Init(connect_ms, proactor);
+  if (ec)
+    return ec;
+
+  ctx_ = util::http::TlsClient::CreateSslContext();
+}
+
+io::Result<std::pair<io::Sink*, uint8_t>, GenericError> GcsSnapshotStorage::OpenWriteFile(
+    const std::string& path) {
+  pair<string, string> bucket_path = GetBucketPath(path);
+  // TODO: we must create conn_pool using proactor.
+  auto conn_pool = gcs_->GetConnectionPool();
+  fb2::ProactorBase* proactor = fb2::ProactorBase::me();
+  io::Result<io::WriteFile*> dest_res =
+      cloud::OpenWriteGcsFile(bucket_path.first, bucket_path.second, &creds_provider_, conn_pool);
+  if (!dest_res) {
+    return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
+  }
+
+  return std::pair(*dest_res, FileType::CLOUD);
+}
+
+io::ReadonlyFileOrError GcsSnapshotStorage::OpenReadFile(const std::string& path) {
+  return nonstd::make_unexpected(make_error_code(errc::not_supported));
+}
+
+io::Result<std::string, GenericError> GcsSnapshotStorage::LoadPath(std::string_view dir,
+                                                                   std::string_view dbfilename) {
+  return nonstd::make_unexpected(GenericError("Not supported"));
+}
+
+io::Result<std::vector<std::string>, GenericError> GcsSnapshotStorage::LoadPaths(
+    const std::string& load_path) {
+  return nonstd::make_unexpected(GenericError("Not supported"));
 }
 
 #ifdef WITH_AWS

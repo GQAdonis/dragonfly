@@ -229,7 +229,6 @@ using strings::HumanReadableNumBytes;
 namespace {
 
 const auto kRedisVersion = "6.2.11";
-constexpr string_view kS3Prefix = "s3://"sv;
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
@@ -250,8 +249,12 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-bool IsCloudPath(string_view path) {
-  return absl::StartsWith(path, kS3Prefix);
+bool IsS3Path(string_view path) {
+  return absl::StartsWith(path, detail::kS3Prefix);
+}
+
+bool IsGCSPath(string_view path) {
+  return absl::StartsWith(path, detail::kGCSPrefix);
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -868,7 +871,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
-  if (IsCloudPath(flag_dir)) {
+  if (IsS3Path(flag_dir)) {
 #ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
     snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
@@ -877,6 +880,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 #else
     LOG(ERROR) << "Compiled without AWS support";
 #endif
+  } else if (IsGCSPath(flag_dir)) {
+    snapshot_storage_ = std::make_shared<detail::GcsSnapshotStorage>();
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {

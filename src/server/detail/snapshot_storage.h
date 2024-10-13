@@ -14,6 +14,8 @@
 
 #include "io/io.h"
 #include "server/common.h"
+#include "util/cloud/gcp/gcp_creds_provider.h"
+#include "util/cloud/gcp/gcs.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"
 
@@ -23,6 +25,7 @@ namespace detail {
 namespace fs = std::filesystem;
 
 constexpr std::string_view kS3Prefix = "s3://";
+constexpr std::string_view kGCSPrefix = "gs://";
 
 const size_t kBucketConnectMs = 2000;
 
@@ -51,6 +54,13 @@ class SnapshotStorage {
   // Returns the snapshot paths given the RDB file or DFS summary file path.
   virtual io::Result<std::vector<std::string>, GenericError> LoadPaths(
       const std::string& load_path) = 0;
+
+  virtual bool IsCloud() const {
+    return false;
+  }
+
+  virtual void ShutdownThreadLocal() {
+  }
 };
 
 class FileSnapshotStorage : public SnapshotStorage {
@@ -72,6 +82,36 @@ class FileSnapshotStorage : public SnapshotStorage {
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
 };
 
+class GcsSnapshotStorage : public SnapshotStorage {
+ public:
+  ~GcsSnapshotStorage();
+
+  std::error_code Init(unsigned connect_ms);
+
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
+      const std::string& path) override;
+
+  io::ReadonlyFileOrError OpenReadFile(const std::string& path) override;
+
+  io::Result<std::string, GenericError> LoadPath(std::string_view dir,
+                                                 std::string_view dbfilename) override;
+
+  io::Result<std::vector<std::string>, GenericError> LoadPaths(
+      const std::string& load_path) override;
+
+  bool IsCloud() const final {
+    return true;
+  }
+
+  void ShutdownThreadLocal() final;
+
+ private:
+  util::cloud::GCPCredsProvider creds_provider_;
+  SSL_CTX* ctx_ = NULL;
+
+  static __thread util::cloud::GCS* gcs_ = nullptr;
+};
+
 #ifdef WITH_AWS
 class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
@@ -88,6 +128,10 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
   io::Result<std::vector<std::string>, GenericError> LoadPaths(
       const std::string& load_path) override;
+
+  bool IsCloud() const final {
+    return true;
+  }
 
  private:
   struct SnapStat {
